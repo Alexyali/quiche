@@ -32,15 +32,15 @@ use std::time::Instant;
 use crate::cc;
 use crate::recovery::Sent;
 
-pub const INITIAL_WINDOW_PACKETS: usize = 10;
+pub const INITIAL_WINDOW_PACKETS: usize = 100;
 
 pub const INITIAL_WINDOW: usize = INITIAL_WINDOW_PACKETS * MAX_DATAGRAM_SIZE;
 
-pub const MINIMUM_WINDOW: usize = 2 * MAX_DATAGRAM_SIZE;
+pub const MINIMUM_WINDOW: usize = 50 * MAX_DATAGRAM_SIZE;
 
 pub const MAX_DATAGRAM_SIZE: usize = 1452;
 
-pub const LOSS_REDUCTION_FACTOR: f64 = 0.5;
+pub const LOSS_REDUCTION_FACTOR: f64 = 0.9;
 
 /// Available congestion control algorithms.
 ///

@@ -24,6 +24,8 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#define _GNU_SOURCE
+
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -54,6 +56,8 @@ struct conn_io {
     quiche_conn *conn;
 };
 
+static int vpipe_fd, apipe_fd;
+
 static void debug_log(const char *line, void *argp) {
     fprintf(stderr, "%s\n", line);
 }
@@ -83,8 +87,8 @@ static void flush_egress(struct ev_loop *loop, struct conn_io *conn_io) {
         fprintf(stderr, "sent %zd bytes\n", sent);
     }
 
-    double t = quiche_conn_timeout_as_nanos(conn_io->conn) / 1e9f;
-    conn_io->timer.repeat = t;
+    // double t = quiche_conn_timeout_as_nanos(conn_io->conn) / 1e9f;
+    conn_io->timer.repeat = 5;//t;
     ev_timer_again(loop, &conn_io->timer);
 }
 
@@ -144,6 +148,10 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
             fprintf(stderr, "failed to send HTTP request\n");
             return;
         }
+        if (quiche_conn_stream_send(conn_io->conn, 8, r, sizeof(r), true) < 0) {
+            fprintf(stderr, "failed to send HTTP request\n");
+            return;
+        }
 
         fprintf(stderr, "sent HTTP request\n");
 
@@ -166,7 +174,11 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
                 break;
             }
 
-            printf("%.*s", (int) recv_len, buf);
+            if (s == 4) {
+                write(vpipe_fd, buf, recv_len);
+            } else if (s == 8) {
+                write(apipe_fd, buf, recv_len);
+            }
 
             if (fin) {
                 if (quiche_conn_close(conn_io->conn, true, 0, NULL, 0) < 0) {
@@ -205,6 +217,11 @@ static void timeout_cb(EV_P_ ev_timer *w, int revents) {
 int main(int argc, char *argv[]) {
     const char *host = argv[1];
     const char *port = argv[2];
+
+    vpipe_fd = open("cvideopipe", O_WRONLY | O_NONBLOCK);
+    apipe_fd = open("caudiopipe", O_WRONLY | O_NONBLOCK);
+    fcntl(vpipe_fd, F_SETPIPE_SZ, 12582912);
+    fcntl(apipe_fd, F_SETPIPE_SZ, 12582912);
 
     const struct addrinfo hints = {
         .ai_family = PF_UNSPEC,
@@ -245,6 +262,7 @@ int main(int argc, char *argv[]) {
     quiche_config_set_application_protos(config,
         (uint8_t *) "\x05hq-27\x05hq-25\x05hq-24\x05hq-23\x08http/0.9", 15);
 
+    quiche_config_load_cert_chain_from_pem_file(config, "./cert.crt");
     quiche_config_set_max_idle_timeout(config, 5000);
     quiche_config_set_max_packet_size(config, MAX_DATAGRAM_SIZE);
     quiche_config_set_initial_max_data(config, 10000000);
@@ -253,6 +271,7 @@ int main(int argc, char *argv[]) {
     quiche_config_set_initial_max_streams_bidi(config, 100);
     quiche_config_set_initial_max_streams_uni(config, 100);
     quiche_config_set_disable_active_migration(config, true);
+    quiche_config_set_cc_algorithm(config, QUICHE_CC_RENO);
 
     if (getenv("SSLKEYLOGFILE")) {
       quiche_config_log_keys(config);
@@ -308,5 +327,7 @@ int main(int argc, char *argv[]) {
 
     quiche_config_free(config);
 
+    close(vpipe_fd);
+    close(apipe_fd);
     return 0;
 }

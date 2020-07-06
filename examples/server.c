@@ -24,6 +24,8 @@
 // NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 // SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+#define _GNU_SOURCE
+
 #include <inttypes.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +45,10 @@
 
 #include <quiche.h>
 
+#define MAX_BUF 32768
+#define MIN(a,b) (((a)<(b))?(a):(b))
+#define MAX(a,b) (((a)>(b))?(a):(b))
+
 #define LOCAL_CONN_ID_LEN 16
 
 #define MAX_DATAGRAM_SIZE 1350
@@ -60,6 +66,8 @@ struct connections {
 
 struct conn_io {
     ev_timer timer;
+    ev_io vpipe_watcher;
+    ev_io apipe_watcher;
 
     int sock;
 
@@ -77,7 +85,14 @@ static quiche_config *config = NULL;
 
 static struct connections *conns = NULL;
 
+static uint8_t *vbuffer, *abuffer;
+static int vpipe_fd, apipe_fd;
+
 static void timeout_cb(EV_P_ ev_timer *w, int revents);
+
+static void vpipe_send_cb(EV_P_ ev_io *w, int revents);
+
+static void apipe_send_cb(EV_P_ ev_io *w, int revents);
 
 static void debug_log(const char *line, void *argp) {
     fprintf(stderr, "%s\n", line);
@@ -110,8 +125,8 @@ static void flush_egress(struct ev_loop *loop, struct conn_io *conn_io) {
         fprintf(stderr, "sent %zd bytes\n", sent);
     }
 
-    double t = quiche_conn_timeout_as_nanos(conn_io->conn) / 1e9f;
-    conn_io->timer.repeat = t;
+    // double t = quiche_conn_timeout_as_nanos(conn_io->conn) / 1e9f;
+    conn_io->timer.repeat = 5;//t;
     ev_timer_again(loop, &conn_io->timer);
 }
 
@@ -153,7 +168,7 @@ static bool validate_token(const uint8_t *token, size_t token_len,
     return true;
 }
 
-static struct conn_io *create_conn(uint8_t *odcid, size_t odcid_len) {
+static struct conn_io *create_conn(struct ev_loop *loop, uint8_t *odcid, size_t odcid_len) {
     struct conn_io *conn_io = malloc(sizeof(*conn_io));
     if (conn_io == NULL) {
         fprintf(stderr, "failed to allocate connection IO\n");
@@ -184,6 +199,15 @@ static struct conn_io *create_conn(uint8_t *odcid, size_t odcid_len) {
 
     ev_init(&conn_io->timer, timeout_cb);
     conn_io->timer.data = conn_io;
+
+    // will cause problem if not start this program first
+    ev_io_init(&conn_io->vpipe_watcher, vpipe_send_cb, vpipe_fd, EV_READ);
+    conn_io->vpipe_watcher.data = conn_io;
+    ev_io_start(loop, &conn_io->vpipe_watcher);
+
+    ev_io_init(&conn_io->apipe_watcher, apipe_send_cb, apipe_fd, EV_READ);
+    conn_io->apipe_watcher.data = conn_io;
+    ev_io_start(loop, &conn_io->apipe_watcher);
 
     HASH_ADD(hh, conns->h, cid, LOCAL_CONN_ID_LEN, conn_io);
 
@@ -305,7 +329,7 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
                 return;
             }
 
-            conn_io = create_conn(odcid, odcid_len);
+            conn_io = create_conn(loop, odcid, odcid_len);
             if (conn_io == NULL) {
                 return;
             }
@@ -344,11 +368,11 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
                     break;
                 }
 
-                if (fin) {
-                    static const char *resp = "byez\n";
-                    quiche_conn_stream_send(conn_io->conn, s, (uint8_t *) resp,
-                                            5, true);
-                }
+                // if (fin) {
+                //     static const char *resp = "byez\n";
+                //     quiche_conn_stream_send(conn_io->conn, s, (uint8_t *) resp,
+                //                             5, true);
+                // }
             }
 
             quiche_stream_iter_free(readable);
@@ -368,6 +392,8 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
             HASH_DELETE(hh, conns->h, conn_io);
 
             ev_timer_stop(loop, &conn_io->timer);
+            ev_io_stop(loop, &conn_io->vpipe_watcher);
+            ev_io_stop(loop, &conn_io->apipe_watcher);
             quiche_conn_free(conn_io->conn);
             free(conn_io);
         }
@@ -392,6 +418,8 @@ static void timeout_cb(EV_P_ ev_timer *w, int revents) {
         HASH_DELETE(hh, conns->h, conn_io);
 
         ev_timer_stop(loop, &conn_io->timer);
+        ev_io_stop(loop, &conn_io->vpipe_watcher);
+        ev_io_stop(loop, &conn_io->apipe_watcher);
         quiche_conn_free(conn_io->conn);
         free(conn_io);
 
@@ -399,9 +427,77 @@ static void timeout_cb(EV_P_ ev_timer *w, int revents) {
     }
 }
 
+static void vpipe_send_cb(EV_P_ ev_io *w, int revents) {
+    int ret;
+    uint8_t *buf_ptr = vbuffer;
+    struct conn_io *conn_io = w->data;
+
+    ret = read(w->fd, vbuffer, MAX_BUF);
+    if (ret < 0) {
+        fprintf(stdout, "error: %d", ret);
+    }
+    while (ret > 0) {
+        int capacity = quiche_conn_stream_capacity(conn_io->conn, 4);
+        int byte_send = MIN(capacity, ret);
+        if (byte_send <= 0)
+            continue;
+        fprintf(stdout, "remain %d bytes, capacity %d bytes, send %d bytes\n", ret, capacity, byte_send);
+        int send_size = quiche_conn_stream_send(conn_io->conn, 4,
+                            buf_ptr, ret, false);
+        if (send_size <= 0) {
+            fprintf(stdout, "vpipe send error");
+            continue;
+        }
+        ret -= send_size;
+        buf_ptr += send_size;
+        flush_egress(loop, conn_io);
+    }
+}
+
+static void apipe_send_cb(EV_P_ ev_io *w, int revents) {
+    int ret;
+    uint8_t *buf_ptr = abuffer;
+    struct conn_io *conn_io = w->data;
+
+    ret = read(w->fd, abuffer, MAX_BUF);
+    if (ret < 0) {
+        fprintf(stdout, "error: %d", ret);
+    }
+    while (ret > 0) {
+        int send_size = quiche_conn_stream_send(conn_io->conn, 8,
+                            buf_ptr, ret, false);
+        if (send_size <= 0) {
+            fprintf(stdout, "apipe send error");
+            continue;
+        }
+        ret -= send_size;
+        buf_ptr += send_size;
+        flush_egress(loop, conn_io);
+    }
+
+}
+
 int main(int argc, char *argv[]) {
     const char *host = argv[1];
     const char *port = argv[2];
+
+    vbuffer = (uint8_t*)malloc(MAX_BUF * sizeof(uint8_t));
+    if (vbuffer == NULL) {
+        perror("malloc error");
+        return -1;
+    }
+    abuffer = (uint8_t*)malloc(MAX_BUF * sizeof(uint8_t));
+    if (abuffer == NULL) {
+        perror("malloc error");
+        return -1;
+    }
+
+
+    vpipe_fd = open("svideopipe", O_RDONLY | O_NONBLOCK);
+    apipe_fd = open("saudiopipe", O_RDONLY | O_NONBLOCK);
+
+    fcntl(vpipe_fd, F_SETPIPE_SZ, 12582912);
+    fcntl(apipe_fd, F_SETPIPE_SZ, 12582912);
 
     const struct addrinfo hints = {
         .ai_family = PF_UNSPEC,
@@ -439,8 +535,8 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
-    quiche_config_load_cert_chain_from_pem_file(config, "examples/cert.crt");
-    quiche_config_load_priv_key_from_pem_file(config, "examples/cert.key");
+    quiche_config_load_cert_chain_from_pem_file(config, "./cert.crt");
+    quiche_config_load_priv_key_from_pem_file(config, "./cert.key");
 
     quiche_config_set_application_protos(config,
         (uint8_t *) "\x05hq-27\x05hq-25\x05hq-24\x05hq-23\x08http/0.9", 21);
@@ -472,6 +568,11 @@ int main(int argc, char *argv[]) {
     freeaddrinfo(local);
 
     quiche_config_free(config);
+
+    close(vpipe_fd);
+    close(apipe_fd);
+    free(vbuffer);
+    free(abuffer);
 
     return 0;
 }
