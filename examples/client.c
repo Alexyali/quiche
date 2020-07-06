@@ -44,12 +44,15 @@
 
 #include <quiche.h>
 
+#include <termios.h>
+
 #define LOCAL_CONN_ID_LEN 16
 
 #define MAX_DATAGRAM_SIZE 1350
 
 struct conn_io {
     ev_timer timer;
+    ev_timer keyboard_timer;
 
     int sock;
 
@@ -60,6 +63,55 @@ static int vpipe_fd, apipe_fd;
 
 static void debug_log(const char *line, void *argp) {
     fprintf(stderr, "%s\n", line);
+}
+
+static struct termios initial_settings, new_settings;
+static int peek_character = -1;
+
+void init_keyboard() {
+    tcgetattr(0,&initial_settings);
+    new_settings = initial_settings;
+    new_settings.c_lflag &= ~ICANON;
+    new_settings.c_lflag &= ~ECHO;
+    new_settings.c_lflag &= ~ISIG;
+    new_settings.c_cc[VMIN] = 1;
+    new_settings.c_cc[VTIME] = 0;
+    tcsetattr(0, TCSANOW, &new_settings);
+}
+
+void close_keyboard() {
+    tcsetattr(0, TCSANOW, &initial_settings);
+}
+
+int kbhit() {
+    unsigned char ch;
+    int nread;
+
+    if (peek_character != -1) return 1;
+    new_settings.c_cc[VMIN]=0;
+    tcsetattr(0, TCSANOW, &new_settings);
+    nread = read(0,&ch,1);
+    new_settings.c_cc[VMIN]=1;
+    tcsetattr(0, TCSANOW, &new_settings);
+    if(nread == 1)
+    {
+        peek_character = ch;
+        return 1;
+    }
+    return 0;
+}
+
+int readch() {
+    char ch;
+
+    if(peek_character != -1)
+    {
+        ch = peek_character;
+        peek_character = -1;
+        return ch;
+    }
+    read(0,&ch,1);
+    return ch;
 }
 
 static void flush_egress(struct ev_loop *loop, struct conn_io *conn_io) {
@@ -90,6 +142,24 @@ static void flush_egress(struct ev_loop *loop, struct conn_io *conn_io) {
     // double t = quiche_conn_timeout_as_nanos(conn_io->conn) / 1e9f;
     conn_io->timer.repeat = 5;//t;
     ev_timer_again(loop, &conn_io->timer);
+}
+
+static void keyboard_cb(EV_P_ ev_timer* w, int revents) {
+    struct conn_io *conn_io = w->data;
+    char ch;
+    if (quiche_conn_is_established(conn_io->conn) && kbhit()) {
+        ch = readch();
+        fprintf(stderr, "********%c********\n", ch);
+        if (ch == 's') {
+            char r[100];
+            sprintf(r,  "*message from client to server*");
+            if (quiche_conn_stream_send(conn_io->conn, 12, (uint8_t *)r, sizeof(r), false) < 0) {
+                fprintf(stderr, "Failed to send keyboard event message.\n");
+                return;
+            }
+            flush_egress(loop, conn_io);
+        }
+    }
 }
 
 static void recv_cb(EV_P_ ev_io *w, int revents) {
@@ -156,6 +226,9 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
         fprintf(stderr, "sent HTTP request\n");
 
         req_sent = true;
+
+        conn_io->keyboard_timer.repeat = 0.1;
+        ev_timer_again(loop, &conn_io->keyboard_timer);
     }
 
     if (quiche_conn_is_established(conn_io->conn)) {
@@ -218,6 +291,7 @@ int main(int argc, char *argv[]) {
     const char *host = argv[1];
     const char *port = argv[2];
 
+    init_keyboard();
     vpipe_fd = open("cvideopipe", O_WRONLY | O_NONBLOCK);
     apipe_fd = open("caudiopipe", O_WRONLY | O_NONBLOCK);
     fcntl(vpipe_fd, F_SETPIPE_SZ, 12582912);
@@ -317,6 +391,9 @@ int main(int argc, char *argv[]) {
     ev_init(&conn_io->timer, timeout_cb);
     conn_io->timer.data = conn_io;
 
+    ev_init(&conn_io->keyboard_timer, keyboard_cb);
+	conn_io->keyboard_timer.data = conn_io;
+
     flush_egress(loop, conn_io);
 
     ev_loop(loop, 0);
@@ -329,5 +406,6 @@ int main(int argc, char *argv[]) {
 
     close(vpipe_fd);
     close(apipe_fd);
+    close_keyboard();
     return 0;
 }

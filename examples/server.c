@@ -368,6 +368,10 @@ static void recv_cb(EV_P_ ev_io *w, int revents) {
                     break;
                 }
 
+                if (s == 12) {
+                    fprintf(stderr, "received %ld bits from client in stream %ld :%s\n",
+                            recv_len, s, buf);
+                }
                 // if (fin) {
                 //     static const char *resp = "byez\n";
                 //     quiche_conn_stream_send(conn_io->conn, s, (uint8_t *) resp,
