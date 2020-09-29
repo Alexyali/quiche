@@ -150,9 +150,9 @@ static void keyboard_cb(EV_P_ ev_timer* w, int revents) {
     if (quiche_conn_is_established(conn_io->conn) && kbhit()) {
         ch = readch();
         fprintf(stderr, "********%c********\n", ch);
-        if (ch == 's') {
+        if (ch >= 'a' && ch <= 'z') {
             char r[100];
-            sprintf(r,  "*message from client to server*");
+            sprintf(r,  "*message %c from client to server*", ch);
             if (quiche_conn_stream_send(conn_io->conn, 12, (uint8_t *)r, sizeof(r), false) < 0) {
                 fprintf(stderr, "Failed to send keyboard event message.\n");
                 return;
