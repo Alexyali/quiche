@@ -93,3 +93,8 @@ $ ./server 127.0.0.1 1234
 $ ./client 127.0.0.1 1234
 $ ffmpeg -re -i ~/demo.ts -codec copy -f mpegts pipe:1 > svideopipe
 ```
+
+### How client interact with server
+- first run 4 cmds as shown in `Test hevc-pipe with video stream`
+- type any Letters on the keyboard from *a* to *z* in `client` terminal, then client will send a message back to server
+- in `server` terminal, you will see output like: `received 100 bits from client in stream 12 :*message s from client to server*`
