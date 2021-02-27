@@ -94,6 +94,30 @@ $ ./client 127.0.0.1 1234
 $ ffmpeg -re -i ~/demo.ts -codec copy -f mpegts pipe:1 > svideopipe
 ```
 
+### Test **hevc-pipe** with video stream under mahimahi
+- open four terminal corresponds to 4 moudules: ffplay, server, client, ffmpeg
+- test in local host, but using `mahimahi` emulating different network
+- first run two terminals
+```shell
+# terminal 1
+$ ffplay -i cvideopipe -infbuf -probesize 32
+# terminal 2
+$ ./server 0.0.0.0 9000
+```
+- open `client` terminal and set mahimahi environment
+```shell
+# terminal 3
+# install mahimahi
+$ sudo apt-get install mahimahi
+# bound link bandwidth to 100mbps, more operation refer to manual or help
+$ mm-link 100M 100M --cbr
+$ ./client 100.64.0.1 9000
+```
+- quickly run `ffmepg` after `client`
+```shell
+$ ffmpeg -re -i ~/demo.ts -codec copy -f mpegts pipe:1 > svideopipe
+```
+
 ### How client interact with server
 - first run 4 cmds as shown in `Test hevc-pipe with video stream`
 - type any Letters on the keyboard from *a* to *z* in `client` terminal, then client will send a message back to server
